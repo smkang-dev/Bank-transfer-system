@@ -1,6 +1,7 @@
 package service;
 
 import dao.UserDAO;
+import util.PasswordHasher;
 import domain.User;
 import exception.DuplicateLoginIdException;
 import exception.UserNotFoundException;
@@ -31,7 +32,7 @@ public class UserService {
         }
 
         // 3) 사용자 생성
-        User user = new User(loginId, password, name);
+        User user = new User(loginId, PasswordHasher.hash(password), name);
 
         // 4) DB 저장
         userDAO.save(user);

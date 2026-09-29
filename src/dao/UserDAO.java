@@ -31,7 +31,7 @@ public class UserDAO {
 
     // 2. 회원 저장
     public int save(User user) {
-        String sql = "INSERT INTO users (login_id, password, name) VALUES (?, ?, ?)";
+        String sql = "INSERT INTO users (login_id, password, name, password_encoding) VALUES (?, ?, ?, 'pbkdf2-sha256')";
 
         try (
                 Connection conn = DBConnection.getConnection();
@@ -62,7 +62,7 @@ public class UserDAO {
 
     // 3. login_id로 사용자 조회
     public User findByLoginId(String loginId) {
-        String sql = "SELECT user_id, login_id, password, name FROM users WHERE login_id = ?";
+        String sql = "SELECT user_id, login_id, password, name, password_encoding FROM users WHERE login_id = ?";
 
         try (
                 Connection conn = DBConnection.getConnection();
@@ -84,7 +84,7 @@ public class UserDAO {
 
     // 4. user_id로 사용자 조회
     public User findById(int userId) {
-        String sql = "SELECT user_id, login_id, password, name FROM users WHERE user_id = ?";
+        String sql = "SELECT user_id, login_id, password, name, password_encoding FROM users WHERE user_id = ?";
 
         try (
                 Connection conn = DBConnection.getConnection();
@@ -106,6 +106,9 @@ public class UserDAO {
 
     // ResultSet -> User 매핑
     private User mapResultSetToUser(ResultSet rs) throws SQLException {
+        if (!"pbkdf2-sha256".equals(rs.getString("password_encoding"))) {
+            throw new SQLException("기존 회원 비밀번호 변환을 먼저 실행하세요.");
+        }
         return new User(
                 rs.getInt("user_id"),
                 rs.getString("login_id"),

@@ -2,158 +2,122 @@ package dao;
 
 import domain.Transaction;
 import util.DBConnection;
-
+import util.ConnectionFactory;
+import java.math.BigDecimal;
 import java.sql.*;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
 
 public class TransactionDAO {
+    private final ConnectionFactory connections;
+    public TransactionDAO() { this(DBConnection::getConnection); }
+    public TransactionDAO(ConnectionFactory connections) { this.connections=connections; }
+    public record RequestRecord(int transactionId, int userId, int fromId, int toId, long amount) {}
+    public record Cursor(Timestamp createdAt, int id) {}
+    public record Page(List<Transaction> items, boolean hasMore) {}
 
-    // 1. 거래 기록 저장
-    public int save(Connection conn, Transaction transaction) {
+    public int save(Connection conn, Transaction t, String requestId, int userId, LocalDate day) {
         String sql = "INSERT INTO transactions "
-                + "(from_account_id, to_account_id, amount, type, t_status) "
-                + "VALUES (?, ?, ?, ?, ?)";
-
-        try (PreparedStatement pstmt = conn.prepareStatement(sql, PreparedStatement.RETURN_GENERATED_KEYS)) {
-            pstmt.setInt(1, transaction.getFromAccountId());
-            pstmt.setInt(2, transaction.getToAccountId());
-            pstmt.setLong(3, transaction.getAmount());
-            pstmt.setString(4, transaction.getType());
-            pstmt.setString(5, transaction.getStatus());
-
-            int rowCount = pstmt.executeUpdate();
-
-            if (rowCount == 0) {
-                throw new RuntimeException("거래 기록 저장에 실패했습니다.");
+                + "(from_account_id,to_account_id,amount,type,t_status,request_id,request_user_id,business_date) "
+                + "VALUES (?,?,?,?,?,?,?,?)";
+        try (PreparedStatement ps = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
+            ps.setInt(1, t.getFromAccountId());
+            ps.setInt(2, t.getToAccountId());
+            ps.setLong(3, t.getAmount());
+            ps.setString(4, t.getType());
+            ps.setString(5, t.getStatus());
+            ps.setString(6, requestId);
+            ps.setInt(7, userId);
+            ps.setDate(8, Date.valueOf(day));
+            if (ps.executeUpdate() != 1) throw new SQLException("거래 기록 저장 실패");
+            try (ResultSet rs = ps.getGeneratedKeys()) {
+                if (rs.next()) return rs.getInt(1);
+                throw new SQLException("거래 ID 반환 실패");
             }
-
-            try (ResultSet rs = pstmt.getGeneratedKeys()) {
-                if (rs.next()) {
-                    return rs.getInt(1);
-                }
-                throw new RuntimeException("생성된 transaction_id를 가져오지 못했습니다.");
-            }
-
         } catch (SQLException e) {
-            throw new RuntimeException("거래 기록 저장 중 오류가 발생했습니다.", e);
+            throw new RuntimeException("거래 기록 저장 실패. 같은 요청 ID로 재확인하세요.", e);
         }
     }
 
-    // 2. 오늘 출금 성공 거래 누적 금액 합계 조회
-    public long getTodayTransferAmount(Connection conn, int accountId) {
-        String sql = "SELECT COALESCE(SUM(amount), 0) AS total_amount "
-                + "FROM transactions "
-                + "WHERE from_account_id = ? "
-                + "AND type = 'TRANSFER' "
-                + "AND t_status = 'SUCCESS' "
-                + "AND DATE(t_created_at) = CURDATE()";
-
-        try (PreparedStatement pstmt = conn.prepareStatement(sql)) {
-
-            pstmt.setInt(1, accountId);
-
-            try (ResultSet rs = pstmt.executeQuery()) {
-                if (rs.next()) {
-                    return rs.getLong("total_amount");
-                }
-                return 0;
+    public RequestRecord findByRequestId(Connection conn, String requestId) {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT transaction_id,request_user_id,from_account_id,to_account_id,amount "
+                        + "FROM transactions WHERE request_id=? AND type='TRANSFER' AND t_status='SUCCESS'")) {
+            ps.setString(1, requestId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? new RequestRecord(rs.getInt(1), rs.getInt(2),
+                        rs.getInt(3), rs.getInt(4), rs.getLong(5)) : null;
             }
-
-        } catch (SQLException e) {
-            throw new RuntimeException("오늘 이체 누적 금액 조회 중 오류가 발생했습니다.", e);
-        }
+        } catch (SQLException e) { throw new RuntimeException("요청 결과 조회 실패", e); }
     }
 
-    // 3. 특정 계좌 전체 거래내역 조회
-    public List<Transaction> findByAccountId(int accountId) {
-        String sql = "SELECT * FROM transactions "
-                + "WHERE from_account_id = ? OR to_account_id = ? "
-                + "ORDER BY t_created_at DESC";
-
-        List<Transaction> transactionList = new ArrayList<>();
-
-        try (Connection conn = DBConnection.getConnection();
-             PreparedStatement pstmt = conn.prepareStatement(sql)) {
-
-            pstmt.setInt(1, accountId);
-            pstmt.setInt(2, accountId);
-
-            try (ResultSet rs = pstmt.executeQuery()) {
-                while (rs.next()) {
-                    transactionList.add(toTransaction(rs));
-                }
-            }
-
-            return transactionList;
-
-        } catch (SQLException e) {
-            throw new RuntimeException("거래내역 조회 중 오류가 발생했습니다.", e);
-        }
+    public LocalDate currentDate(Connection conn) {
+        try (Statement s = conn.createStatement(); ResultSet rs = s.executeQuery("SELECT CURDATE()")) {
+            rs.next();
+            return rs.getDate(1).toLocalDate();
+        } catch (SQLException e) { throw new RuntimeException("영업일 조회 실패", e); }
     }
 
-    // 4. 특정 기간 거래내역 조회
-    public List<Transaction> findByAccountIdAndPeriod(int accountId, Timestamp startDate, Timestamp endDate) {
-        String sql = "SELECT * FROM transactions "
-                + "WHERE (from_account_id = ? OR to_account_id = ?) "
-                + "AND t_created_at BETWEEN ? AND ? "
-                + "ORDER BY t_created_at DESC";
-
-        List<Transaction> transactionList = new ArrayList<>();
-
-        try (Connection conn = DBConnection.getConnection();
-             PreparedStatement pstmt = conn.prepareStatement(sql)) {
-
-            pstmt.setInt(1, accountId);
-            pstmt.setInt(2, accountId);
-            pstmt.setTimestamp(3, startDate);
-            pstmt.setTimestamp(4, endDate);
-
-            try (ResultSet rs = pstmt.executeQuery()) {
-                while (rs.next()) {
-                    transactionList.add(toTransaction(rs));
-                }
-            }
-
-            return transactionList;
-
-        } catch (SQLException e) {
-            throw new RuntimeException("기간별 거래내역 조회 중 오류가 발생했습니다.", e);
-        }
+    public BigDecimal getTransferAmount(Connection conn, int id, LocalDate day) {
+        // 합계는 BIGINT보다 클 수 있으므로 BigDecimal로 받는다.
+        String sql = "SELECT COALESCE(SUM(amount),0) FROM transactions "
+                + "WHERE from_account_id=? AND business_date=? "
+                + "AND type='TRANSFER' AND t_status='SUCCESS'";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setInt(1, id);
+            ps.setDate(2, Date.valueOf(day));
+            try (ResultSet rs = ps.executeQuery()) { rs.next(); return rs.getBigDecimal(1); }
+        } catch (SQLException e) { throw new RuntimeException("일일 이체 합계 조회 실패", e); }
     }
 
-    // 5. 거래 ID 기준 상세 조회
-    public Transaction findById(int transactionId) {
-        String sql = "SELECT * FROM transactions WHERE transaction_id = ?";
-
-        try (Connection conn = DBConnection.getConnection();
-             PreparedStatement pstmt = conn.prepareStatement(sql)) {
-
-            pstmt.setInt(1, transactionId);
-
-            try (ResultSet rs = pstmt.executeQuery()) {
-                if (rs.next()) {
-                    return toTransaction(rs);
-                }
-                return null;
+    public Page findPage(int accountId, Timestamp start, Timestamp endExclusive,
+                         Cursor cursor, int size) {
+        if (size < 1 || size > 200) throw new IllegalArgumentException("페이지 크기는 1~200");
+        if ((start == null) != (endExclusive == null))
+            throw new IllegalArgumentException("기간의 시작·끝이 함께 필요합니다.");
+        StringBuilder sql = new StringBuilder(
+                "SELECT * FROM transactions WHERE (from_account_id=? OR to_account_id=?)");
+        if (start != null) sql.append(" AND t_created_at>=? AND t_created_at<?");
+        if (cursor != null) sql.append(
+                " AND (t_created_at<? OR (t_created_at=? AND transaction_id<?))");
+        sql.append(" ORDER BY t_created_at DESC,transaction_id DESC LIMIT ?");
+        try (Connection conn = connections.open();
+             PreparedStatement ps = conn.prepareStatement(sql.toString())) {
+            int i = 1;
+            ps.setInt(i++, accountId);
+            ps.setInt(i++, accountId);
+            if (start != null) {
+                ps.setTimestamp(i++, start);
+                ps.setTimestamp(i++, endExclusive);
             }
-
-        } catch (SQLException e) {
-            throw new RuntimeException("거래 상세 조회 중 오류가 발생했습니다.", e);
-        }
+            if (cursor != null) {
+                ps.setTimestamp(i++, cursor.createdAt());
+                ps.setTimestamp(i++, cursor.createdAt());
+                ps.setInt(i++, cursor.id());
+            }
+            ps.setInt(i, size + 1);
+            List<Transaction> items = new ArrayList<>();
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) items.add(toTransaction(rs));
+            }
+            boolean more = items.size() > size;
+            if (more) items.remove(items.size() - 1);
+            return new Page(List.copyOf(items), more);
+        } catch (SQLException e) { throw new RuntimeException("거래내역 조회 실패", e); }
     }
 
-    // ResultSet -> Transaction
+    public Transaction findById(int id) {
+        try (Connection conn = connections.open();
+             PreparedStatement ps = conn.prepareStatement("SELECT * FROM transactions WHERE transaction_id=?")) {
+            ps.setInt(1, id);
+            try (ResultSet rs = ps.executeQuery()) { return rs.next() ? toTransaction(rs) : null; }
+        } catch (SQLException e) { throw new RuntimeException("거래 상세 조회 실패", e); }
+    }
+
     private Transaction toTransaction(ResultSet rs) throws SQLException {
-        int transactionId = rs.getInt("transaction_id");
-        int fromAccountId = rs.getInt("from_account_id");
-        int toAccountId = rs.getInt("to_account_id");
-        long amount = rs.getLong("amount");
-        String type = rs.getString("type");
-        String status = rs.getString("t_status");
-        Timestamp createdAt = rs.getTimestamp("t_created_at");
-
-        return new Transaction(transactionId, fromAccountId, toAccountId, amount,
-                type, status, createdAt);
+        return new Transaction(rs.getInt("transaction_id"), rs.getInt("from_account_id"),
+                rs.getInt("to_account_id"), rs.getLong("amount"), rs.getString("type"),
+                rs.getString("t_status"), rs.getTimestamp("t_created_at"));
     }
 }

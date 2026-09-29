@@ -1,6 +1,7 @@
 package service;
 
 import dao.UserDAO;
+import util.PasswordHasher;
 import domain.User;
 import exception.UserNotFoundException;
 
@@ -25,10 +26,11 @@ public class LoginService {
         }
 
         // 4. 비밀번호 일치 확인
-        if (!password.equals(user.getPassword())) {
+        if (!PasswordHasher.matches(password, user.getPassword())) {
             throw new IllegalArgumentException("비밀번호가 일치하지 않습니다.");
         }
 
         return user;
     }
 }
+

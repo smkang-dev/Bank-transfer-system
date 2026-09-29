@@ -12,8 +12,8 @@ public class AccountDAO {
     // 1. 계좌 생성
     public int save(Account account) {
         String sql = "Insert INTO accounts"
-                + "(user_id, account_number, balance, account_password, status, one_time_limit, daily_limit)"
-                + "VALUES (?, ?, ?, ?, ?, ?, ?)";
+                + "(user_id, account_number, balance, account_password, status, one_time_limit, daily_limit, password_encoding)"
+                + "VALUES (?, ?, ?, ?, ?, ?, ?, 'pbkdf2-sha256')";
         try (Connection conn = DBConnection.getConnection();
              PreparedStatement pstmt = conn.prepareStatement(sql, PreparedStatement.RETURN_GENERATED_KEYS)
         ) {
@@ -292,11 +292,13 @@ public class AccountDAO {
 
     // 14. 출금 처리
     public int withdraw(Connection conn, int accountId, long amount) {
-        String sql = "UPDATE accounts SET balance = balance - ? WHERE account_id = ?";
+        if (amount <= 0) throw new IllegalArgumentException("금액은 양수여야 합니다.");
+        String sql = "UPDATE accounts SET balance = balance - ? WHERE account_id = ? AND balance >= ?";
 
         try (PreparedStatement pstmt = conn.prepareStatement(sql)) {
             pstmt.setLong(1, amount);
             pstmt.setInt(2, accountId);
+            pstmt.setLong(3, amount);
 
             return pstmt.executeUpdate();
 
@@ -307,11 +309,13 @@ public class AccountDAO {
 
     // 15. 입금 처리
     public int deposit(Connection conn, int accountId, long amount) {
-        String sql = "UPDATE accounts SET balance = balance + ? WHERE account_id = ?";
+        if (amount <= 0) throw new IllegalArgumentException("금액은 양수여야 합니다.");
+        String sql = "UPDATE accounts SET balance = balance + ? WHERE account_id = ? AND balance <= ?";
 
         try (PreparedStatement pstmt = conn.prepareStatement(sql)) {
             pstmt.setLong(1, amount);
             pstmt.setInt(2, accountId);
+            pstmt.setLong(3, Long.MAX_VALUE - amount);
 
             return pstmt.executeUpdate();
 
@@ -320,37 +324,47 @@ public class AccountDAO {
         }
     }
 
-    // 16. 데드락 방지
-    public List<Account> lockAccountsInOrder(Connection conn, int fromAccountId, int toAccountId) {
-        String sql = "SELECT * FROM accounts "
-                + "WHERE account_id IN (?, ?) "
-                + "ORDER BY account_id ASC FOR UPDATE";
-
-        List<Account> lockedAccounts = new ArrayList<>();
-
-        try (PreparedStatement pstmt = conn.prepareStatement(sql)) {
-            pstmt.setInt(1, fromAccountId);
-            pstmt.setInt(2, toAccountId);
-
-            try (ResultSet rs = pstmt.executeQuery()) {
-                while (rs.next()) {
-                    lockedAccounts.add(toAccount(rs));
+    // 같은 잠금 프로토콜을 사용하는 이체끼리 순환 대기 가능성을 줄인다.
+    // DB의 다른 작업까지 포함한 데드락 제거를 보장하지 않는다.
+    public List<Account> lockAccountsInOrder(Connection conn, int fromId, int toId) {
+        if (fromId == toId) throw new IllegalArgumentException("동일 계좌 이체 불가");
+        List<Account> result = new ArrayList<>();
+        int[] ids = {Math.min(fromId, toId), Math.max(fromId, toId)};
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT * FROM accounts WHERE account_id = ? FOR UPDATE")) {
+            for (int id : ids) {
+                ps.setInt(1, id);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) result.add(toAccount(rs));
                 }
             }
-
-            return lockedAccounts;
-
+            return result;
         } catch (SQLException e) {
-            throw new RuntimeException("계좌 락 처리 중 오류가 발생했습니다.", e);
+            throw new RuntimeException("계좌 잠금 실패", e);
+        }
+    }
+
+    public Account findByAccountNumber(Connection conn, String number) {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT * FROM accounts WHERE account_number = ?")) {
+            ps.setString(1, number);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? toAccount(rs) : null;
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("계좌번호 조회 실패", e);
         }
     }
 
     // ResultSet -> Account
     private Account toAccount(ResultSet rs) throws SQLException {
+        if (!"pbkdf2-sha256".equals(rs.getString("password_encoding"))) {
+            throw new SQLException("기존 계좌 비밀번호 변환을 먼저 실행하세요.");
+        }
         int accountId = rs.getInt("account_id");
         int userId = rs.getInt("user_id");
         String accountNumber = rs.getString("account_number");
-        long balance = rs.getInt("balance");
+        long balance = rs.getLong("balance");
         String accountPassword = rs.getString("account_password");
         long oneTimeLimit = rs.getLong("one_time_limit");
         long dailyLimit = rs.getLong("daily_limit");
@@ -362,3 +376,4 @@ public class AccountDAO {
                 oneTimeLimit, dailyLimit, status, createdAt);
     }
 }
+

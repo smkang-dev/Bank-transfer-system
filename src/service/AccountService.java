@@ -1,6 +1,7 @@
 package service;
 
 import dao.AccountDAO;
+import util.PasswordHasher;
 import domain.Account;
 import exception.AccountNotFoundException;
 import exception.InsufficientBalanceException;
@@ -32,7 +33,7 @@ public class AccountService {
             accountNumber = generateAccountNumber();
         }
 
-        Account account = new Account(userId, accountNumber, 0L, accountPassword,
+        Account account = new Account(userId, accountNumber, 0L, PasswordHasher.hash(accountPassword),
                 1000000L, 5000000L, "ACTIVE");
 
         return accountDAO.save(account);
@@ -122,7 +123,7 @@ public class AccountService {
             throw new AccountNotFoundException("존재하지 않는 계좌입니다.");
         }
 
-        if (!savedPassword.equals(inputPassword)) {
+        if (!PasswordHasher.matches(inputPassword, savedPassword)) {
             throw new InvalidAccountPasswordException("계좌 비밀번호가 일치하지 않습니다.");
         }
     }
